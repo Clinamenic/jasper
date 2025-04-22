@@ -6,7 +6,7 @@ import re
 import shutil
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Dict, List, Optional, TypedDict, cast
+from typing import Dict, List, Optional, TypedDict, cast, Callable, Any
 
 import frontmatter
 
@@ -42,11 +42,13 @@ logger = logging.getLogger("jasper.arweave")
 
 def load_arweave_index(index_file: Path = Path("data/archive.json")) -> List[Dict]:
     """Load Arweave index data from the JSON file."""
-    if not index_file.exists():
-        logger.warning(f"Archive file not found at {index_file}, returning empty list.")
-        return []
-
     try:
+        if not index_file.exists():
+            logger.warning(
+                f"Archive file not found at {index_file}, returning empty list."
+            )
+            return []
+
         with open(index_file, "r") as f:
             archive_content = f.read()
             # Check for and fix common JSON issues like trailing commas
@@ -54,14 +56,12 @@ def load_arweave_index(index_file: Path = Path("data/archive.json")) -> List[Dic
             archive_content = re.sub(r",\s*]", "]", archive_content)
             data = json.loads(archive_content)
 
-            # Ensure the archive has the correct structure
-            if "files" not in data:
+            if not isinstance(data, dict) or "files" not in data:
                 logger.warning(
-                    f"Archive {index_file} missing 'files' key, returning empty list."
+                    f"Archive {index_file} has invalid structure, returning empty list."
                 )
                 return []
 
-            # Basic validation of structure (optional, but good practice)
             if not isinstance(data["files"], list):
                 logger.error(f"Archive {index_file} 'files' key is not a list.")
                 return []
@@ -69,9 +69,6 @@ def load_arweave_index(index_file: Path = Path("data/archive.json")) -> List[Dic
             logger.info(f"Loaded {len(data['files'])} entries from {index_file}")
             return data.get("files", [])
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from archive {index_file}: {e}")
-        return []
     except Exception as e:
         logger.error(f"Error loading archive file {index_file}: {str(e)}")
         return []
@@ -150,23 +147,27 @@ def get_arweave_status(
 
 def _find_wallet_path() -> Optional[str]:
     """Find the Arweave wallet file path."""
+    # Check environment variable first
     wallet_path = os.environ.get("ARWEAVE_WALLET_PATH")
     if wallet_path and Path(wallet_path).exists():
         logger.info(f"Using wallet from ARWEAVE_WALLET_PATH: {wallet_path}")
         return wallet_path
 
-    # Try default locations
+    # Try default locations, prioritizing .wallet.json in current directory
     default_paths = [
-        Path("jasper/wallet.json"),  # Relative to project root
-        Path(".cursor/tools/wallet.json"),  # Cursor-specific
-        Path.home() / ".config" / "arkb" / "wallet.json",
+        Path(".wallet.json"),  # Current directory (new primary location)
+        Path("jasper/.wallet.json"),  # Jasper directory
+        Path.home() / ".config" / "arkb" / "wallet.json",  # System-wide fallback
     ]
+
+    # Log all attempted paths for debugging
     for path in default_paths:
-        if path.exists():
-            logger.info(f"Found wallet at default location: {path}")
-            # Optionally set env var if found? Or just return path.
-            # os.environ["ARWEAVE_WALLET_PATH"] = str(path)
-            return str(path)
+        abs_path = path.resolve()
+        if abs_path.exists():
+            logger.info(f"Found wallet at: {abs_path}")
+            return str(abs_path)
+        else:
+            logger.debug(f"Tried wallet path (not found): {abs_path}")
 
     logger.warning(
         "No Arweave wallet file found in environment variable or default locations."
@@ -367,9 +368,7 @@ async def upload_to_arweave(
 
 async def upload_files_to_arweave(
     files_to_upload: List[Path],
-    app_notify_callback: Optional[
-        callable
-    ] = None,  # Allow app to provide notification hook
+    app_notify_callback: Optional[Callable[[str], None]] = None,
     index_file: Path = Path("data/archive.json"),
 ) -> Dict[Path, Optional[str]]:
     """
@@ -377,13 +376,12 @@ async def upload_files_to_arweave(
 
     Args:
         files_to_upload: List of file paths to upload.
-        app_notify_callback: Optional callback function (e.g., app.notify) for status updates.
+        app_notify_callback: Optional callback for UI notifications.
         index_file: Path to the Arweave index JSON file.
 
     Returns:
         A dictionary mapping file paths to their resulting Arweave TX ID (or None if failed).
     """
-
     upload_results: Dict[Path, Optional[str]] = {}
 
     if not files_to_upload:
@@ -395,47 +393,43 @@ async def upload_files_to_arweave(
         error_msg = "Arweave upload cannot proceed: Wallet path not found."
         logger.error(error_msg)
         if app_notify_callback:
-            app_notify_callback(error_msg, severity="error", timeout=10)
-        return {file_path: None for file_path in files_to_upload}  # Mark all as failed
+            app_notify_callback(error_msg)
+        return {file_path: None for file_path in files_to_upload}
 
     logger.info(f"Starting Arweave upload process for {len(files_to_upload)} files.")
     if app_notify_callback:
         app_notify_callback(
-            f"Starting Arweave upload for {len(files_to_upload)} files...", timeout=3
+            f"Starting Arweave upload for {len(files_to_upload)} files..."
         )
 
-    # Load index data once at the beginning
     index_data = load_arweave_index(index_file)
-    original_index_data = [
-        item.copy() for item in index_data
-    ]  # Deep copy for comparison
+    original_index_data = [item.copy() for item in index_data]
 
     for file_path in files_to_upload:
-        upload_results[file_path] = None  # Default to failure
+        upload_results[file_path] = None
         try:
             logger.info(f"Processing for Arweave upload: {file_path.name}")
 
             # Get metadata from frontmatter
-            post = frontmatter.load(file_path)
-            file_uuid = post.get("uuid")
-            title = post.get("title", "Untitled")
-            file_type = post.get("type")  # Get type for tagging
+            with open(str(file_path), "r") as f:
+                post = frontmatter.load(f)
+
+            file_uuid = str(post.get("uuid", ""))
+            title = str(post.get("title", "Untitled"))
+            file_type = str(post.get("type", ""))
 
             if not file_uuid:
                 error_msg = f"Skipping {file_path.name}: No UUID found in frontmatter."
                 logger.error(error_msg)
                 if app_notify_callback:
-                    app_notify_callback(error_msg, severity="warning", timeout=5)
-                continue  # Skip this file
+                    app_notify_callback(error_msg)
+                continue
 
             # Prepare Arweave tags
             tags = DEFAULT_TAGS.copy()
             tags.append({"name": "UUID", "value": file_uuid})
             if file_type:
                 tags.append({"name": "Type", "value": file_type})
-            # Consider adding other relevant tags like 'Title', 'File-Path'?
-            # tags.append({"name": "Title", "value": title})
-            # tags.append({"name": "Source-Path", "value": str(file_path)})
 
             # Perform the upload
             tx_id = await upload_to_arweave(file_path, tags, wallet_path)
@@ -444,108 +438,66 @@ async def upload_files_to_arweave(
                 error_msg = f"Failed to upload {file_path.name} to Arweave."
                 logger.error(error_msg)
                 if app_notify_callback:
-                    app_notify_callback(error_msg, severity="error", timeout=5)
-                continue  # Skip index update for this failed file
+                    app_notify_callback(error_msg)
+                continue
 
-            # --- Update Index ---
-            upload_results[file_path] = tx_id  # Record success
+            # Update index
+            upload_results[file_path] = tx_id
 
             timestamp = datetime.now(UTC).isoformat()
             arweave_hash_entry: ArweaveHash = {
                 "hash": tx_id,
                 "timestamp": timestamp,
                 "link": f"https://www.arweave.net/{tx_id}",
-                # Tags are not stored in the index
             }
 
             found_entry = False
             for item in index_data:
                 if item.get("uuid") == file_uuid:
-                    # Append new hash to existing entry
                     if "arweave_hashes" not in item or not isinstance(
                         item["arweave_hashes"], list
                     ):
-                        item["arweave_hashes"] = []  # Initialize if missing/invalid
+                        item["arweave_hashes"] = []
                     item["arweave_hashes"].append(arweave_hash_entry)
-
-                    # Optionally update title if it changed?
-                    if item.get("title") != title:
-                        logger.info(
-                            f"Updating title for {file_uuid} from '{item.get('title')}' to '{title}'"
-                        )
-                        item["title"] = title
-
+                    item["title"] = title
                     found_entry = True
-                    logger.info(
-                        f"Updated existing Arweave index entry for {file_uuid} ({file_path.name})"
-                    )
+                    logger.info(f"Updated existing Arweave index entry for {file_uuid}")
                     break
 
             if not found_entry:
-                # Create new entry
                 new_item = {
                     "uuid": file_uuid,
                     "title": title,
                     "arweave_hashes": [arweave_hash_entry],
-                    # Store other relevant metadata? e.g., original path?
-                    # "source_path": str(file_path)
                 }
                 index_data.append(new_item)
-                logger.info(
-                    f"Created new Arweave index entry for {file_uuid} ({file_path.name})"
-                )
+                logger.info(f"Created new Arweave index entry for {file_uuid}")
 
-            # Save index immediately after processing each file to minimize data loss on error
             if not save_arweave_index(index_data, index_file):
-                # If save fails, log error but continue processing other files
                 error_msg = f"Critical: Failed to save updated Arweave index after uploading {file_path.name}!"
                 logger.error(error_msg)
                 if app_notify_callback:
-                    app_notify_callback(error_msg, severity="error", timeout=10)
-                # Consider halting? Or just warning? For now, continue.
+                    app_notify_callback(error_msg)
 
             success_msg = f"Uploaded {file_path.name}: {tx_id[:10]}..."
             if app_notify_callback:
-                app_notify_callback(success_msg, severity="information", timeout=4)
+                app_notify_callback(success_msg)
 
-        except FileNotFoundError:
-            error_msg = f"Error processing {file_path.name}: File not found (might have been moved/deleted)."
-            logger.error(error_msg)
-            if app_notify_callback:
-                app_notify_callback(error_msg, severity="error", timeout=5)
-        except frontmatter.FrontmatterError as e:
-            error_msg = f"Error processing {file_path.name}: Invalid frontmatter. {e}"
-            logger.error(error_msg)
-            if app_notify_callback:
-                app_notify_callback(error_msg, severity="error", timeout=5)
         except Exception as e:
-            error_msg = (
-                f"Unexpected error processing {file_path.name} for Arweave: {str(e)}"
-            )
-            logger.exception(error_msg)  # Log full traceback for unexpected errors
+            error_msg = f"Error processing {file_path.name}: {str(e)}"
+            logger.error(error_msg)
             if app_notify_callback:
-                app_notify_callback(
-                    f"Error uploading {file_path.name}", severity="error", timeout=5
-                )
-
-    # Final check if index data changed and final save (optional, as saving happens in loop)
-    if index_data != original_index_data:
-        logger.info("Arweave index was modified during the upload process.")
-        # Final save attempt if any changes were made (belt-and-suspenders)
-        # save_arweave_index(index_data, index_file)
-    else:
-        logger.info("Arweave index data remained unchanged after the upload process.")
+                app_notify_callback(f"Error uploading {file_path.name}")
 
     completed_msg = f"Arweave upload process completed. Results: { {fp.name: txid[:6]+'...' if txid else 'Failed' for fp, txid in upload_results.items()} }"
     logger.info(completed_msg)
     if app_notify_callback:
-        # Provide a summary notification
         success_count = sum(1 for txid in upload_results.values() if txid)
         fail_count = len(files_to_upload) - success_count
         summary_msg = (
             f"Arweave upload finished: {success_count} succeeded, {fail_count} failed."
         )
-        app_notify_callback(summary_msg, severity="information", timeout=5)
+        app_notify_callback(summary_msg)
 
     return upload_results
 

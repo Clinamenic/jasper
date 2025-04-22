@@ -38,7 +38,7 @@ import rich
 from rich.text import Text
 
 # Import the Arweave functions
-import jasper_arweave
+import modules.jasper_arweave as jasper_arweave
 
 
 # Types - Keep core types needed by the app itself
@@ -52,7 +52,7 @@ class DirectoryState(TypedDict):
 # Arweave-specific constants (DEFAULT_TAGS, TEST_MODE) moved to jasper_arweave
 
 # Setup logger - Keep main app logger setup
-LOG_PATH = Path("jasper/jasper.log")  # Updated log path for the jasper version
+LOG_PATH = Path("logs/jasper.log")  # Updated log path to logs directory
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(

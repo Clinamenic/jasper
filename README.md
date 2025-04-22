@@ -76,9 +76,23 @@ your_content_root/
 
 ## Configuration
 
-- Arweave wallet and configuration settings are managed through the `jasper_arweave.py` module
+- Arweave wallet configuration:
+  - Place your Arweave wallet JSON file as `.wallet.json` in the jasper directory
+  - The wallet file should contain your Arweave JWK (JSON Web Key)
+  - This file is gitignored by default for security
 - Log files are stored in `jasper/jasper.log`
 - Test mode can be toggled to simulate uploads without actual blockchain transactions
+
+Example directory structure with wallet:
+
+```
+your_content_root/
+  ├── some_markdown.md
+  ├── another_markdown.md
+  └── jasper/
+      ├── jasper.py
+      └── .wallet.json  # Your Arweave wallet file
+```
 
 ## Development
 
